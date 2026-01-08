@@ -193,17 +193,17 @@ impl Numeric for f64x4 {
 
     #[inline(always)]
     fn sqrt(self) -> Self {
-        SimdFloatOps::sqrt(self)
+        <Self as SimdFloatOps>::sqrt(self)
     }
 
     #[inline(always)]
     fn abs(self) -> Self {
-        SimdFloatOps::abs(self)
+        <Self as SimdFloatOps>::abs(self)
     }
 
     #[inline(always)]
     fn max(self, other: Self) -> Self {
-        SimdFloatOps::simd_max(self, other)
+        <Self as SimdFloatOps>::simd_max(self, other)
     }
 
     #[inline(always)]
@@ -214,7 +214,7 @@ impl Numeric for f64x4 {
     #[inline(always)]
     fn mul_add(self, a: Self, b: Self) -> Self {
         // std::simd fornece mul_add nativo via SimdFloatOps
-        SimdFloatOps::mul_add(self, a, b)
+        <Self as SimdFloatOps>::mul_add(self, a, b)
     }
 
     #[inline(always)]
@@ -241,28 +241,28 @@ impl Numeric for f64x4 {
 
     #[inline(always)]
     fn reduce_sum(self) -> f64 {
-        SimdFloatOps::reduce_sum(self)
+        <Self as SimdFloatOps>::reduce_sum(self)
     }
 
     #[inline(always)]
     fn reduce_max(self) -> f64 {
-        SimdFloatOps::reduce_max(self)
+        <Self as SimdFloatOps>::reduce_max(self)
     }
 
     #[inline(always)]
     fn reduce_min(self) -> f64 {
-        SimdFloatOps::reduce_min(self)
+        <Self as SimdFloatOps>::reduce_min(self)
     }
 
     #[inline(always)]
     fn is_nan(self) -> bool {
         // is_nan retorna um mask, precisamos de .any() para o booleano escalar
-        SimdFloatOps::is_nan(self).any()
+        <Self as SimdFloatOps>::is_nan(self).any()
     }
 
     #[inline(always)]
     fn is_finite(self) -> bool {
-        SimdFloatOps::is_finite(self).all()
+        <Self as SimdFloatOps>::is_finite(self).all()
     }
 
     fn from_slice(slice: &[f64]) -> Self {
