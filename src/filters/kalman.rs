@@ -69,6 +69,18 @@ impl KalmanFilter1D {
         // Uncertainty prediction: p_pred = f^2 * p + q
         self.p = self.f * self.f * self.p + self.q;
     }
+
+    /// Update process noise
+    #[inline(always)]
+    pub fn set_process_noise(&mut self, q: f64) { 
+        self.q = q; 
+    }
+
+    /// Update measurement noise
+    #[inline(always)]
+    pub fn set_measurement_noise(&mut self, r: f64) { 
+        self.r = r; 
+    }
     
     /// Update step with measurement (measurement update)
     #[inline(always)]
