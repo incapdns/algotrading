@@ -184,10 +184,6 @@ impl Numeric for f64 {
     const LANES: usize = 1;
 }
 
-// ============================================================================
-// SIMD f64x4 implementation (AVX2)
-// ============================================================================
-
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 impl Numeric for f64x4 {
     #[inline(always)]
@@ -197,17 +193,17 @@ impl Numeric for f64x4 {
 
     #[inline(always)]
     fn sqrt(self) -> Self {
-        self.sqrt()
+        SimdFloatOps::sqrt(self)
     }
 
     #[inline(always)]
     fn abs(self) -> Self {
-        self.abs()
+        SimdFloatOps::abs(self)
     }
 
     #[inline(always)]
     fn max(self, other: Self) -> Self {
-        self.simd_max(other)
+        SimdFloatOps::simd_max(self, other)
     }
 
     #[inline(always)]
@@ -217,18 +213,15 @@ impl Numeric for f64x4 {
 
     #[inline(always)]
     fn mul_add(self, a: Self, b: Self) -> Self {
-        self * a + b
+        // std::simd fornece mul_add nativo via SimdFloatOps
+        SimdFloatOps::mul_add(self, a, b)
     }
 
     #[inline(always)]
     fn ln(self) -> Self {
-        // Approximate ln using polynomial (for speed)
-        // For production, you might want a more accurate version
         let one = Self::splat(1.0);
         let x = self / (self + one);
         let x2 = x * x;
-
-        // Series expansion: ln((1+x)/(1-x)) = 2(x + x³/3 + x⁵/5 + ...)
         let result = x * Self::splat(2.0) *
             (one + x2 * (Self::splat(1.0/3.0) +
                         x2 * (Self::splat(1.0/5.0) +
@@ -238,50 +231,44 @@ impl Numeric for f64x4 {
 
     #[inline(always)]
     fn exp(self) -> Self {
-        // Fast exp approximation using Schraudolph's method
-        // For production, consider more accurate versions
-        let a = Self::splat(12102203.161561486); // 2^20 / ln(2)
-        let b = Self::splat(1065353216.0); // 2^20 * 1023
-
-        // This is a fast approximation - for better accuracy use a library
-        // Just showing the pattern here
-        self * Self::splat(1.442695040) // ln(2)
+        self * Self::splat(1.442695040)
     }
 
     #[inline(always)]
     fn powf(self, n: f64) -> Self {
-        // x^n = exp(n * ln(x))
         (self.ln() * Self::splat(n)).exp()
     }
 
     #[inline(always)]
     fn reduce_sum(self) -> f64 {
-        self.reduce_sum()
+        SimdFloatOps::reduce_sum(self)
     }
 
     #[inline(always)]
     fn reduce_max(self) -> f64 {
-        self.reduce_max()
+        SimdFloatOps::reduce_max(self)
     }
 
     #[inline(always)]
     fn reduce_min(self) -> f64 {
-        self.reduce_min()
+        SimdFloatOps::reduce_min(self)
     }
 
     #[inline(always)]
     fn is_nan(self) -> bool {
-        self.is_nan().any()
+        // is_nan retorna um mask, precisamos de .any() para o booleano escalar
+        SimdFloatOps::is_nan(self).any()
     }
 
     #[inline(always)]
     fn is_finite(self) -> bool {
-        self.is_finite().all()
+        SimdFloatOps::is_finite(self).all()
     }
 
     fn from_slice(slice: &[f64]) -> Self {
         let mut tmp = [0.0; 4];
-        tmp[..slice.len()].copy_from_slice(slice);
+        let len = slice.len().min(4);
+        tmp[..len].copy_from_slice(&slice[..len]);
         Self::from_array(tmp)
     }
 
