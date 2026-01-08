@@ -7,7 +7,7 @@ use std::ops::{Add, Sub, Mul, Div, AddAssign, SubAssign, MulAssign, Neg};
 pub mod helpers;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-pub use std::simd::{f64x4, f64x8, SimdFloat as SimdFloatOps};
+pub use std::simd::{f64x4, f64x8, num::SimdFloat as SimdFloatOps};
 
 /// Core numeric trait for types that can be used in quantitative computations
 ///
