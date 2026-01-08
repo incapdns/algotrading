@@ -218,14 +218,7 @@ impl Numeric for f64x4 {
 
     #[inline(always)]
     fn ln(self) -> Self {
-        let one = Self::splat(1.0);
-        let x = self / (self + one);
-        let x2 = x * x;
-        let result = x * Self::splat(2.0) *
-            (one + x2 * (Self::splat(1.0/3.0) +
-                        x2 * (Self::splat(1.0/5.0) +
-                             x2 * Self::splat(1.0/7.0))));
-        result
+        <Self as StdFloatOps>::ln(self)
     }
 
     #[inline(always)]
@@ -235,7 +228,7 @@ impl Numeric for f64x4 {
 
     #[inline(always)]
     fn powf(self, n: f64) -> Self {
-        (self.ln() * Self::splat(n)).exp()
+        (<Self as StdFloatOps>::ln(self) * Self::splat(n)).exp()
     }
 
     #[inline(always)]
@@ -312,16 +305,7 @@ impl Numeric for f64x8 {
 
     #[inline(always)]
     fn ln(self) -> Self {
-        // Same approximation as f64x4
-        let one = Self::splat(1.0);
-        let x = self / (self + one);
-        let x2 = x * x;
-
-        let result = x * Self::splat(2.0) *
-            (one + x2 * (Self::splat(1.0/3.0) +
-                        x2 * (Self::splat(1.0/5.0) +
-                             x2 * Self::splat(1.0/7.0))));
-        result
+        <Self as StdFloatOps>::ln(self)
     }
 
     #[inline(always)]
@@ -331,7 +315,7 @@ impl Numeric for f64x8 {
 
     #[inline(always)]
     fn powf(self, n: f64) -> Self {
-        (self.ln() * Self::splat(n)).exp()
+        (<Self as StdFloatOps>::ln(self) * Self::splat(n)).exp()
     }
 
     #[inline(always)]
