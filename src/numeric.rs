@@ -282,7 +282,7 @@ impl Numeric for f64x8 {
 
     #[inline(always)]
     fn sqrt(self) -> Self {
-        <Self as StdFloatOps>::sqrt
+        <Self as StdFloatOps>::sqrt(self)
     }
 
     #[inline(always)]
