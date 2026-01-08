@@ -44,6 +44,13 @@ impl<T: Numeric> EWMA<T> {
         }
     }
 
+    #[inline(always)]
+    pub fn scale(&mut self, factor: T) {
+        if self.initialized {
+            self.value = self.value * factor;
+        }
+    }
+
     /// Create from period (more intuitive)
     #[inline]
     pub fn from_period(period: usize) -> Self {
