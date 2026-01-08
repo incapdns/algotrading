@@ -228,7 +228,9 @@ impl Numeric for f64x4 {
 
     #[inline(always)]
     fn powf(self, n: f64) -> Self {
-        (<Self as StdFloatOps>::ln(self) * Self::splat(n)).exp()
+        let ln_x = <Self as StdFloatOps>::ln(self);
+        let n_ln_x = ln_x * Self::splat(n);
+        <Self as StdFloatOps>::exp(n_ln_x)
     }
 
     #[inline(always)]
@@ -315,7 +317,9 @@ impl Numeric for f64x8 {
 
     #[inline(always)]
     fn powf(self, n: f64) -> Self {
-        (<Self as StdFloatOps>::ln(self) * Self::splat(n)).exp()
+        let ln_x = <Self as StdFloatOps>::ln(self);
+        let n_ln_x = ln_x * Self::splat(n);
+        <Self as StdFloatOps>::exp(n_ln_x)
     }
 
     #[inline(always)]
