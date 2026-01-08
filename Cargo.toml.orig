@@ -1,0 +1,67 @@
+[package]
+name = "algotrading"
+version = "0.1.0-alpha.2"
+edition = "2024"
+authors = ["Nicholas Davidson <ndavidson19@g.ucla.edu>"]
+description = "A high-performance algorithmic trading toolkit written in Rust, with no dependencies."
+license = "MIT"
+repository = "https://github.com/ndavidson19/algotrading"
+readme = "README.md"
+
+[features]
+default = []
+# Enable SIMD optimizations (requires nightly or Rust 1.82+)
+# Provides 2-4x speedup for rolling statistics and indicators
+simd = []
+# Enable AVX-512 (requires compatible CPU)
+avx512 = ["simd"]
+
+[dependencies]
+# Macro support for type name concatenation
+paste = "1.0"
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+# SIMD intrinsics (stable)
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Enable target-cpu=native for local development/backtesting
+# For production, use target-cpu=x86-64-v3 (AVX2 guaranteed)
+[profile.release.package."*"]
+opt-level = 3
+
+# Benchmark profile
+[profile.bench]
+inherits = "release"
+
+[[bench]]
+name = "primitives"
+harness = false
+
+[[bench]]
+name = "performance"
+harness = false
+
+[[bench]]
+name = "stats_core"
+harness = false
+
+[[bench]]
+name = "distributions"
+harness = false
+
+[[bench]]
+name = "matrix_ops"
+harness = false
+
+[build-dependencies]
+# For detecting CPU features at compile time
