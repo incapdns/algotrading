@@ -57,6 +57,19 @@ impl<T: Numeric> EWMA<T> {
         Self::new(2.0 / (period as f64 + 1.0))
     }
 
+    #[inline(always)]
+    pub fn consume(&mut self, value: T, alpha: f64) -> T {
+        if !self.initialized {
+            self.value = value;
+            self.initialized = true;
+        } else {
+            self.value =
+                value * T::splat(alpha) +
+                self.value * T::splat(1.0 - alpha);
+        }
+        self.value
+    }
+
     /// Update with new value
     #[inline(always)]
     pub fn update(&mut self, value: T) -> T {
