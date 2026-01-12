@@ -58,7 +58,7 @@ impl<T: Numeric> EWMA<T> {
     }
 
     #[inline(always)]
-    pub fn is_initialized(&self) {
+    pub fn is_initialized(&self) -> bool {
         self.initialized
     }
 
