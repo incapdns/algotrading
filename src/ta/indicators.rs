@@ -58,6 +58,11 @@ impl<T: Numeric> EWMA<T> {
     }
 
     #[inline(always)]
+    pub fn is_initialized(&self) {
+        self.initialized
+    }
+
+    #[inline(always)]
     pub fn consume(&mut self, value: T, alpha: f64) -> T {
         if !self.initialized {
             self.value = value;
