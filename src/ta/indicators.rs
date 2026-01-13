@@ -44,6 +44,15 @@ impl<T: Numeric> EWMA<T> {
         }
     }
 
+    #[inline]
+    pub fn with_prior(alpha: f64, prior: T) -> Self {
+        Self {
+            value: prior,
+            alpha,
+            initialized: true,
+        }
+    }
+
     #[inline(always)]
     pub fn scale(&mut self, factor: T) {
         if self.initialized {
