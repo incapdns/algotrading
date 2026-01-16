@@ -54,6 +54,12 @@ impl<T: Numeric> EWMA<T> {
     }
 
     #[inline(always)]
+    pub fn set(&mut self, value: T) {
+        self.value = value;
+        self.initialized = true;
+    }
+    
+    #[inline(always)]
     pub fn scale(&mut self, factor: T) {
         if self.initialized {
             self.value = self.value * factor;
