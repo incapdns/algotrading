@@ -82,27 +82,6 @@ impl KalmanFilter1D {
         self.r = r; 
     }
     
-    /// Update step with measurement (measurement update)
-    #[inline(always)]
-    pub fn update(&mut self, measurement: f64) -> f64 {
-        // Innovation: y = z - x
-        let innovation = measurement - self.x;
-        
-        // Innovation covariance: s = p + r
-        let s = self.p + self.r;
-        
-        // Kalman gain: k = p / s
-        let k = self.p / s;
-        
-        // Update state estimate: x = x + k * y
-        self.x += k * innovation;
-        
-        // Update uncertainty: p = (1 - k) * p
-        self.p *= 1.0 - k;
-        
-        self.x
-    }
-    
     /// Combined predict + update (most common usage)
     #[inline]
     pub fn filter(&mut self, measurement: f64) -> f64 {
@@ -127,6 +106,58 @@ impl KalmanFilter1D {
     pub fn reset(&mut self, state: f64, uncertainty: f64) {
         self.x = state;
         self.p = uncertainty;
+    }
+}
+
+// ============================================================
+// KALMAN UPDATE RESULT
+// ============================================================
+
+#[derive(Debug, Clone, Copy)]
+pub struct KalmanUpdate {
+    pub state: f64,           // x̂ (estimativa da média)
+    pub innovation: f64,      // y = z - x̂ 
+    pub innovation_var: f64,  // S = P + R
+    pub innovation_std: f64,  // sqrt(S)
+    pub kalman_gain: f64,     // K
+    pub state_var: f64,       // P (pós-update)
+    pub state_std: f64,       // sqrt(P)
+}
+
+impl KalmanFilter1D {
+    #[inline(always)]
+    pub fn update_full(&mut self, measurement: f64) -> KalmanUpdate {
+        // Innovation: y = z - x
+        let innovation = measurement - self.x;
+        
+        // Innovation covariance: s = p + r
+        let s = self.p + self.r;
+        
+        // Kalman gain: k = p / s
+        let k = self.p / s;
+        
+        // Update state estimate: x = x + k * y
+        self.x += k * innovation;
+        
+        // Update uncertainty: p = (1 - k) * p
+        self.p *= 1.0 - k;
+        
+        KalmanUpdate {
+            state: self.x,
+            innovation,
+            innovation_var: s,
+            innovation_std: s.sqrt().max(EPSILON),
+            kalman_gain: k,
+            state_var: self.p,
+            state_std: self.p.sqrt(),
+        }
+    }
+    
+    /// Backward compatible
+    #[inline(always)]
+    #[deprecated(note = "Use update_full()")]
+    pub fn update(&mut self, measurement: f64) -> f64 {
+        self.update_full(measurement).state
     }
 }
 
