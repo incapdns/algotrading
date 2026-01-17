@@ -146,7 +146,7 @@ impl KalmanFilter1D {
             state: self.x,
             innovation,
             innovation_var: s,
-            innovation_std: s.sqrt().max(EPSILON),
+            innovation_std: s.sqrt(),
             kalman_gain: k,
             state_var: self.p,
             state_std: self.p.sqrt(),
