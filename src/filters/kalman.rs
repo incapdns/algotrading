@@ -161,6 +161,46 @@ impl KalmanFilter1D {
     }
 }
 
+// ============================================
+// ADICIONAR APÓS KalmanUpdate existente
+// ============================================
+
+/// Result of N-dimensional Kalman update step
+/// Contains all values needed for TickEngine V6 signal generation
+#[derive(Debug, Clone)]
+pub struct KalmanUpdateND<const N: usize> {
+    /// Updated state vector [β, α] for N=2
+    pub state: [f64; N],
+    
+    /// Innovation (measurement residual): y = z - H*x_pred
+    pub innovation: f64,
+    
+    /// Innovation variance: S = H*P*Hᵀ + R
+    pub innovation_var: f64,
+    
+    /// Innovation standard deviation: sqrt(S)
+    pub innovation_std: f64,
+    
+    /// Kalman gain vector
+    pub kalman_gain: [f64; N],
+    
+    /// Updated covariance matrix
+    pub covariance: [[f64; N]; N],
+}
+
+impl<const N: usize> KalmanUpdateND<N> {
+    /// Compute Z-score: innovation / innovation_std
+    /// This is the primary signal for TickEngine V6
+    #[inline]
+    pub fn z_score(&self) -> f64 {
+        if self.innovation_std > 1e-10 {
+            self.innovation / self.innovation_std
+        } else {
+            0.0
+        }
+    }
+}
+
 /// N-dimensional Kalman filter (for multivariate state)
 #[repr(align(64))]
 pub struct KalmanFilterND<const N: usize> {
@@ -251,6 +291,270 @@ impl<const N: usize> KalmanFilterND<N> {
     #[inline]
     pub fn state(&self) -> [f64; N] {
         self.x
+    }
+}
+
+// ============================================
+// Kalman Filter 2D otimizado para TickEngine V6
+// State: [β (hedge_ratio), α (intercept)]
+// ============================================
+
+/// 2D Kalman Filter for spread statistics (TickEngine V6)
+/// 
+/// Estimates:
+/// - β (hedge ratio): optimal relationship between spot and futures
+/// - α (intercept): spread mean
+/// 
+/// Features:
+/// - Joseph form covariance update (numerical stability)
+/// - Dynamic observation matrix H
+/// - Adaptive Q/R support
+#[repr(align(64))]
+#[derive(Debug, Clone)]
+pub struct KalmanFilter2D {
+    /// State vector: [β, α]
+    x: [f64; 2],
+    
+    /// Covariance matrix 2x2
+    p: [[f64; 2]; 2],
+    
+    /// State transition matrix (usually identity for random walk)
+    f: [[f64; 2]; 2],
+    
+    /// Process noise covariance (adaptive)
+    q: [[f64; 2]; 2],
+    
+    /// Measurement noise variance (adaptive, scalar for 1D measurement)
+    r: f64,
+}
+
+impl KalmanFilter2D {
+    /// Create new 2D Kalman filter for spread estimation
+    /// 
+    /// # Arguments
+    /// * `initial_beta` - Initial hedge ratio estimate (typically 1.0)
+    /// * `initial_alpha` - Initial intercept estimate (typically 0.0)
+    /// * `initial_p` - Initial covariance (uncertainty)
+    /// * `q_beta` - Process noise for β
+    /// * `q_alpha` - Process noise for α
+    /// * `r` - Measurement noise variance
+    pub fn new(
+        initial_beta: f64,
+        initial_alpha: f64,
+        initial_p: f64,
+        q_beta: f64,
+        q_alpha: f64,
+        r: f64,
+    ) -> Self {
+        Self {
+            x: [initial_beta, initial_alpha],
+            p: [
+                [initial_p, 0.0],
+                [0.0, initial_p],
+            ],
+            f: [
+                [1.0, 0.0],
+                [0.0, 1.0],
+            ], // Identity (random walk)
+            q: [
+                [q_beta, 0.0],
+                [0.0, q_alpha],
+            ],
+            r,
+        }
+    }
+
+    /// Create with TickEngine V6 default parameters
+    /// From documentation: Q diagonal, R scalar
+    pub fn default_tick_engine() -> Self {
+        Self::new(
+            1.0,    // initial_beta (hedge ratio starts at 1.0)
+            0.0,    // initial_alpha (no intercept initially)
+            1.0,    // initial_p (high uncertainty)
+            1e-5,   // q_beta (slow adaptation)
+            1e-5,   // q_alpha (slow adaptation)
+            1e-3,   // r (measurement noise)
+        )
+    }
+
+    /// Predict step
+    /// 
+    /// x̂[t|t-1] = F × x̂[t-1|t-1]
+    /// P[t|t-1] = F × P[t-1|t-1] × Fᵀ + Q
+    #[inline]
+    pub fn predict(&mut self) {
+        // For identity F, x stays the same
+        // x_pred = F * x (identity, so no change)
+        
+        // P_pred = F * P * Fᵀ + Q
+        // For identity F: P_pred = P + Q
+        self.p[0][0] += self.q[0][0];
+        self.p[0][1] += self.q[0][1];
+        self.p[1][0] += self.q[1][0];
+        self.p[1][1] += self.q[1][1];
+    }
+
+    /// Update step with dynamic H matrix
+    /// 
+    /// For TickEngine V6:
+    /// - measurement = vamp_spot
+    /// - h = [vamp_futures, 1.0]
+    /// 
+    /// Uses Joseph form for numerical stability:
+    /// P = (I - K*H) * P * (I - K*H)ᵀ + K * R * Kᵀ
+    #[inline]
+    pub fn update(&mut self, measurement: f64, h: [f64; 2]) -> KalmanUpdateND<2> {
+        // ===== Innovation =====
+        // y = z - H * x_pred
+        let h_x = h[0] * self.x[0] + h[1] * self.x[1];
+        let innovation = measurement - h_x;
+
+        // ===== Innovation covariance =====
+        // S = H * P * Hᵀ + R
+        // For H = [h0, h1], S is scalar
+        let ph0 = self.p[0][0] * h[0] + self.p[0][1] * h[1];
+        let ph1 = self.p[1][0] * h[0] + self.p[1][1] * h[1];
+        let s = h[0] * ph0 + h[1] * ph1 + self.r;
+
+        // ===== Kalman Gain =====
+        // K = P * Hᵀ * S⁻¹
+        let s_inv = 1.0 / s.max(1e-10);
+        let k = [ph0 * s_inv, ph1 * s_inv];
+
+        // ===== State update =====
+        // x = x + K * y
+        self.x[0] += k[0] * innovation;
+        self.x[1] += k[1] * innovation;
+
+        // ===== Covariance update (Joseph form) =====
+        // I_KH = I - K * H
+        // P = I_KH * P * I_KHᵀ + K * R * Kᵀ
+        let i_kh = [
+            [1.0 - k[0] * h[0], -k[0] * h[1]],
+            [-k[1] * h[0], 1.0 - k[1] * h[1]],
+        ];
+
+        // temp = I_KH * P
+        let temp = [
+            [
+                i_kh[0][0] * self.p[0][0] + i_kh[0][1] * self.p[1][0],
+                i_kh[0][0] * self.p[0][1] + i_kh[0][1] * self.p[1][1],
+            ],
+            [
+                i_kh[1][0] * self.p[0][0] + i_kh[1][1] * self.p[1][0],
+                i_kh[1][0] * self.p[0][1] + i_kh[1][1] * self.p[1][1],
+            ],
+        ];
+
+        // P_joseph = temp * I_KHᵀ
+        let p_joseph = [
+            [
+                temp[0][0] * i_kh[0][0] + temp[0][1] * i_kh[0][1],
+                temp[0][0] * i_kh[1][0] + temp[0][1] * i_kh[1][1],
+            ],
+            [
+                temp[1][0] * i_kh[0][0] + temp[1][1] * i_kh[0][1],
+                temp[1][0] * i_kh[1][0] + temp[1][1] * i_kh[1][1],
+            ],
+        ];
+
+        // K * R * Kᵀ (R is scalar)
+        let kr_kt = [
+            [k[0] * self.r * k[0], k[0] * self.r * k[1]],
+            [k[1] * self.r * k[0], k[1] * self.r * k[1]],
+        ];
+
+        // P = P_joseph + K * R * Kᵀ
+        self.p = [
+            [p_joseph[0][0] + kr_kt[0][0], p_joseph[0][1] + kr_kt[0][1]],
+            [p_joseph[1][0] + kr_kt[1][0], p_joseph[1][1] + kr_kt[1][1]],
+        ];
+
+        let innovation_std = s.sqrt();
+
+        KalmanUpdateND {
+            state: self.x,
+            innovation,
+            innovation_var: s,
+            innovation_std,
+            kalman_gain: k,
+            covariance: self.p,
+        }
+    }
+
+    /// Combined predict + update (convenience method)
+    #[inline]
+    pub fn step(&mut self, measurement: f64, h: [f64; 2]) -> KalmanUpdateND<2> {
+        self.predict();
+        self.update(measurement, h)
+    }
+
+    // ===== Adaptive Q/R methods =====
+
+    /// Update process noise covariance
+    #[inline]
+    pub fn set_q(&mut self, q_beta: f64, q_alpha: f64) {
+        self.q[0][0] = q_beta;
+        self.q[1][1] = q_alpha;
+    }
+
+    /// Update measurement noise variance
+    #[inline]
+    pub fn set_r(&mut self, r: f64) {
+        self.r = r;
+    }
+
+    /// Adapt Q based on innovation (TickEngine V6 adaptive)
+    /// Increases Q when innovations are large
+    #[inline]
+    pub fn adapt_q(&mut self, innovation_var: f64, base_q: f64, sensitivity: f64) {
+        let adaptive_q = base_q * (1.0 + sensitivity * innovation_var);
+        self.q[0][0] = adaptive_q;
+        self.q[1][1] = adaptive_q;
+    }
+
+    /// Adapt R based on recent measurement variance
+    #[inline]
+    pub fn adapt_r(&mut self, measurement_var: f64, min_r: f64) {
+        self.r = measurement_var.max(min_r);
+    }
+
+    // ===== Accessors =====
+
+    /// Get current hedge ratio (β)
+    #[inline]
+    pub fn beta(&self) -> f64 {
+        self.x[0]
+    }
+
+    /// Get current intercept (α)
+    #[inline]
+    pub fn alpha(&self) -> f64 {
+        self.x[1]
+    }
+
+    /// Get current state [β, α]
+    #[inline]
+    pub fn state(&self) -> [f64; 2] {
+        self.x
+    }
+
+    /// Get current covariance matrix
+    #[inline]
+    pub fn covariance(&self) -> [[f64; 2]; 2] {
+        self.p
+    }
+
+    /// Get β uncertainty (std dev)
+    #[inline]
+    pub fn beta_std(&self) -> f64 {
+        self.p[0][0].sqrt()
+    }
+
+    /// Get α uncertainty (std dev)
+    #[inline]
+    pub fn alpha_std(&self) -> f64 {
+        self.p[1][1].sqrt()
     }
 }
 
