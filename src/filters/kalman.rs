@@ -389,6 +389,10 @@ impl KalmanFilter2D {
             last_h: [1.0, 1.0],
             last_innovation: 0.0,
             last_k: [0.0, 0.0],
+            p_pred: [
+                [p_beta, 0.0],
+                [0.0, p_alpha],
+            ],
         }
     }
 
