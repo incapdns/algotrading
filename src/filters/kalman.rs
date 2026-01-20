@@ -342,6 +342,8 @@ pub struct KalmanFilter2D {
 
     /// Último Kalman gain (para cálculo de Q adaptativo)
     last_k: [f64; 2],
+
+    p_pred: [[f64; 2]; 2], 
 }
 
 impl KalmanFilter2D {
@@ -438,6 +440,8 @@ impl KalmanFilter2D {
         
         // P_pred = F * P * Fᵀ + Q
         // For identity F: P_pred = P + Q
+        self.p_pred = self.p;
+        
         self.p[0][0] += self.q[0][0];
         self.p[0][1] += self.q[0][1];
         self.p[1][0] += self.q[1][0];
@@ -571,23 +575,15 @@ impl KalmanFilter2D {
     pub fn adapt_r_robbins_monro(&mut self) {
         let h = self.last_h;
         let innovation = self.last_innovation;
-        
-        // innovation_sq = y²
         let innovation_sq = innovation * innovation;
         
-        // H × P × Hᵀ (scalar, já que measurement é 1D)
-        // Usamos P atual (pós-update), mas conceitualmente deveria ser P[t|t-1]
-        // Para implementação correta, precisaríamos guardar P_pred
-        // Aproximação: usar P atual que é próximo
-        let ph0 = self.p[0][0] * h[0] + self.p[0][1] * h[1];
-        let ph1 = self.p[1][0] * h[0] + self.p[1][1] * h[1];
+        let ph0 = self.p_pred[0][0] * h[0] + self.p_pred[0][1] * h[1];
+        let ph1 = self.p_pred[1][0] * h[0] + self.p_pred[1][1] * h[1];
         let h_p_ht = h[0] * ph0 + h[1] * ph1;
         
-        // R[t] = (1 - α_r) × R[t-1] + α_r × (innovation_sq - H × P × Hᵀ)
+        // R[t] = (1 - α_r) × R[t-1] + α_r × (y² - H × P_pred × Hᵀ)
         let r_update = innovation_sq - h_p_ht;
         self.r = (1.0 - self.alpha_r) * self.r + self.alpha_r * r_update;
-        
-        // Floor para estabilidade conforme §3.6 [13]
         self.r = self.r.max(self.r_min);
     }
 
