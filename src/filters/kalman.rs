@@ -435,17 +435,13 @@ impl KalmanFilter2D {
     /// P[t|t-1] = F × P[t-1|t-1] × Fᵀ + Q
     #[inline]
     pub fn predict(&mut self) {
-        // For identity F, x stays the same
-        // x_pred = F * x (identity, so no change)
-        
-        // P_pred = F * P * Fᵀ + Q
-        // For identity F: P_pred = P + Q
-        self.p_pred = self.p;
-        
+        // P_pred = P + Q (para F = Identity)
         self.p[0][0] += self.q[0][0];
         self.p[0][1] += self.q[0][1];
         self.p[1][0] += self.q[1][0];
         self.p[1][1] += self.q[1][1];
+        
+        self.p_pred = self.p;
     }
 
     /// Update step with dynamic H matrix
