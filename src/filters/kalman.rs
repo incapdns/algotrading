@@ -781,6 +781,635 @@ impl KalmanFilter2D {
     }
 }
 
+// ============================================================
+// POSITION-VELOCITY KALMAN FILTER (Constant Velocity Model)
+// ============================================================
+
+/// Configuração do Position-Velocity Kalman
+/// Análogo ao KalmanFilter2D mas para tracking de velocity
+#[derive(Debug, Clone, Copy)]
+pub struct PVKalmanConfig {
+    /// Incerteza inicial da position
+    pub initial_position_var: f64,
+    /// Incerteza inicial da velocity
+    pub initial_velocity_var: f64,
+    /// Process noise da position (default: 1e-5)
+    pub q_position: f64,
+    /// Process noise da velocity (default: 1e-6)
+    pub q_velocity: f64,
+    /// Measurement noise (default: 1e-4)
+    pub r: f64,
+    /// Alpha para adaptação de Q (default: 0.01)
+    pub alpha_q: f64,
+    /// Alpha para adaptação de R (default: 0.05)
+    pub alpha_r: f64,
+    /// Floor mínimo para Q
+    pub q_min: f64,
+    /// Floor mínimo para R
+    pub r_min: f64,
+    /// Mínimo de ticks para warmup
+    pub min_ticks: u64,
+}
+
+impl Default for PVKalmanConfig {
+    fn default() -> Self {
+        Self {
+            initial_position_var: 1.0,
+            initial_velocity_var: 0.1,
+            q_position: 1e-5,
+            q_velocity: 1e-6,
+            r: 1e-4,
+            alpha_q: 0.01,
+            alpha_r: 0.05,
+            q_min: 1e-8,
+            r_min: 1e-6,
+            min_ticks: 10,
+        }
+    }
+}
+
+/// Resultado do Position-Velocity Kalman update
+#[derive(Debug, Clone, Copy)]
+pub struct PVKalmanResult {
+    /// Position filtrada
+    pub position: f64,
+    /// Velocity filtrada (taxa de mudança)
+    pub velocity: f64,
+    /// Innovation (residual)
+    pub innovation: f64,
+    /// Innovation variance
+    pub innovation_var: f64,
+    /// Desvio padrão da velocity
+    pub velocity_std: f64,
+    /// Kalman gain [K_position, K_velocity]
+    pub kalman_gain: [f64; 2],
+    /// Se velocity é confiável (passou warmup)
+    pub is_valid: bool,
+}
+
+impl PVKalmanResult {
+    /// Z-score da innovation
+    #[inline]
+    pub fn z_score(&self) -> f64 {
+        let std = self.innovation_var.sqrt();
+        if std > 1e-10 {
+            self.innovation / std
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Position-Velocity Kalman Filter
+/// 
+/// Modelo Newtoniano (Constant Velocity):
+/// - position[t+1] = position[t] + velocity[t]
+/// - velocity[t+1] = velocity[t] (random walk)
+/// 
+/// Usado para detectar reversão de tendência via velocity < 0
+/// 
+/// Features (análogo ao KalmanFilter2D):
+/// - Q/R adaptativos via Robbins-Monro [1] §3.6
+/// - Joseph form para estabilidade numérica [1] §3.4
+/// - Simetrização periódica de covariância [1] §13.2
+/// - Health check da matriz de covariância
+#[repr(align(64))]
+#[derive(Debug, Clone)]
+pub struct PositionVelocityKalman {
+    /// Estado: [position, velocity]
+    x: [f64; 2],
+    
+    /// Covariância 2x2 P[t|t]
+    p: [[f64; 2]; 2],
+    
+    /// Covariância predita P[t|t-1] - guardada após predict()
+    /// para uso em adapt_r_robbins_monro() [1] §3.6.1
+    p_pred: [[f64; 2]; 2],
+    
+    /// Process noise covariance Q (adaptativo)
+    q: [[f64; 2]; 2],
+    
+    /// Measurement noise variance R (adaptativo, escalar)
+    r: f64,
+    
+    /// Alpha para adaptação de Q
+    alpha_q: f64,
+    
+    /// Alpha para adaptação de R
+    alpha_r: f64,
+    
+    /// Floor mínimo para Q
+    q_min: f64,
+    
+    /// Floor mínimo para R
+    r_min: f64,
+    
+    /// Última innovation (para Q adaptativo)
+    last_innovation: f64,
+    
+    /// Último Kalman gain (para Q adaptativo)
+    last_k: [f64; 2],
+    
+    /// Contador de ticks para warmup
+    tick_count: u64,
+    
+    /// Mínimo de ticks para considerar válido
+    min_ticks: u64,
+}
+
+impl PositionVelocityKalman {
+    /// Cria novo filtro com configuração padrão
+    pub fn new() -> Self {
+        Self::with_config(PVKalmanConfig::default())
+    }
+    
+    /// Cria com configuração customizada
+    pub fn with_config(config: PVKalmanConfig) -> Self {
+        Self {
+            x: [0.0, 0.0],
+            p: [
+                [config.initial_position_var, 0.0],
+                [0.0, config.initial_velocity_var],
+            ],
+            p_pred: [
+                [config.initial_position_var, 0.0],
+                [0.0, config.initial_velocity_var],
+            ],
+            q: [
+                [config.q_position, 0.0],
+                [0.0, config.q_velocity],
+            ],
+            r: config.r,
+            alpha_q: config.alpha_q,
+            alpha_r: config.alpha_r,
+            q_min: config.q_min,
+            r_min: config.r_min,
+            last_innovation: 0.0,
+            last_k: [0.0, 0.0],
+            tick_count: 0,
+            min_ticks: config.min_ticks,
+        }
+    }
+    
+    /// Predict step
+    /// 
+    /// State transition (Constant Velocity Model):
+    /// ```text
+    /// F = [1, 1]  (position += velocity * dt, dt=1)
+    ///     [0, 1]  (velocity = random walk)
+    /// ```
+    /// 
+    /// x_pred = F × x
+    /// P_pred = F × P × Fᵀ + Q
+    /// 
+    /// Guarda P_pred para adapt_r_robbins_monro() [1] §3.6.1
+    #[inline]
+    pub fn predict(&mut self) {
+        // x_pred = F × x
+        // F = [[1,1], [0,1]]
+        // position_pred = position + velocity
+        // velocity_pred = velocity
+        self.x[0] = self.x[0] + self.x[1];
+        // self.x[1] permanece (random walk)
+        
+        // P_pred = F × P × Fᵀ + Q
+        // Expandido para F = [[1,1], [0,1]]:
+        //
+        // F × P = [[P00+P10, P01+P11],
+        //          [P10,     P11    ]]
+        //
+        // (F × P) × Fᵀ = [[P00+P10+P01+P11, P01+P11],
+        //                 [P10+P11,         P11    ]]
+        
+        let fp00 = self.p[0][0] + self.p[1][0];
+        let fp01 = self.p[0][1] + self.p[1][1];
+        let fp10 = self.p[1][0];
+        let fp11 = self.p[1][1];
+        
+        // (F × P) × Fᵀ
+        self.p[0][0] = fp00 + fp01 + self.q[0][0];
+        self.p[0][1] = fp01;
+        self.p[1][0] = fp10 + fp11;
+        self.p[1][1] = fp11 + self.q[1][1];
+        
+        // Guardar P_pred APÓS adicionar Q [1] §3.6.1
+        self.p_pred = self.p;
+    }
+    
+    /// Update step
+    /// 
+    /// H = [1, 0] (observamos apenas position)
+    /// 
+    /// Uses Joseph form for numerical stability [1] §3.4
+    #[inline]
+    pub fn update(&mut self, observation: f64) -> PVKalmanResult {
+        // H = [1, 0]
+        
+        // ═══════════════════════════════════════════════════════
+        // Innovation: y = z - H × x_pred = observation - position
+        // ═══════════════════════════════════════════════════════
+        let innovation = observation - self.x[0];
+        self.last_innovation = innovation;
+        
+        // ═══════════════════════════════════════════════════════
+        // Innovation covariance: S = H × P × Hᵀ + R
+        // Com H = [1, 0]: S = P[0][0] + R
+        // ═══════════════════════════════════════════════════════
+        let s = self.p[0][0] + self.r;
+        let s_inv = 1.0 / s.max(1e-12);
+        
+        // ═══════════════════════════════════════════════════════
+        // Kalman Gain: K = P × Hᵀ × S⁻¹
+        // Com H = [1, 0]: K = [P[0][0], P[1][0]]ᵀ × S⁻¹
+        // ═══════════════════════════════════════════════════════
+        let k = [self.p[0][0] * s_inv, self.p[1][0] * s_inv];
+        self.last_k = k;
+        
+        // ═══════════════════════════════════════════════════════
+        // State update: x = x_pred + K × y
+        // ═══════════════════════════════════════════════════════
+        self.x[0] += k[0] * innovation;
+        self.x[1] += k[1] * innovation;
+        
+        // ═══════════════════════════════════════════════════════
+        // Covariance update (Joseph form) [1] §3.4
+        // P = (I - K×H) × P × (I - K×H)ᵀ + K × R × Kᵀ
+        // ═══════════════════════════════════════════════════════
+        
+        // I - K×H com H = [1, 0]
+        // = [[1-K0, 0],
+        //    [-K1,  1]]
+        let i_kh = [
+            [1.0 - k[0], 0.0],
+            [-k[1], 1.0],
+        ];
+        
+        // temp = (I - K×H) × P
+        let temp = [
+            [
+                i_kh[0][0] * self.p[0][0] + i_kh[0][1] * self.p[1][0],
+                i_kh[0][0] * self.p[0][1] + i_kh[0][1] * self.p[1][1],
+            ],
+            [
+                i_kh[1][0] * self.p[0][0] + i_kh[1][1] * self.p[1][0],
+                i_kh[1][0] * self.p[0][1] + i_kh[1][1] * self.p[1][1],
+            ],
+        ];
+        
+        // P_joseph = temp × (I - K×H)ᵀ
+        let p_joseph = [
+            [
+                temp[0][0] * i_kh[0][0] + temp[0][1] * i_kh[0][1],
+                temp[0][0] * i_kh[1][0] + temp[0][1] * i_kh[1][1],
+            ],
+            [
+                temp[1][0] * i_kh[0][0] + temp[1][1] * i_kh[0][1],
+                temp[1][0] * i_kh[1][0] + temp[1][1] * i_kh[1][1],
+            ],
+        ];
+        
+        // K × R × Kᵀ
+        let kr_kt = [
+            [k[0] * self.r * k[0], k[0] * self.r * k[1]],
+            [k[1] * self.r * k[0], k[1] * self.r * k[1]],
+        ];
+        
+        // P = P_joseph + K × R × Kᵀ
+        self.p = [
+            [p_joseph[0][0] + kr_kt[0][0], p_joseph[0][1] + kr_kt[0][1]],
+            [p_joseph[1][0] + kr_kt[1][0], p_joseph[1][1] + kr_kt[1][1]],
+        ];
+        
+        self.tick_count += 1;
+        
+        PVKalmanResult {
+            position: self.x[0],
+            velocity: self.x[1],
+            innovation,
+            innovation_var: s,
+            velocity_std: self.p[1][1].sqrt(),
+            kalman_gain: k,
+            is_valid: self.tick_count >= self.min_ticks,
+        }
+    }
+    
+    /// Combined predict + update
+    #[inline]
+    pub fn step(&mut self, observation: f64) -> PVKalmanResult {
+        self.predict();
+        self.update(observation)
+    }
+    
+    /// Combined predict + update with adaptive Q/R (Robbins-Monro)
+    /// Conforme [1] §3.6
+    #[inline]
+    pub fn step_adaptive(&mut self, observation: f64) -> PVKalmanResult {
+        self.predict();
+        let result = self.update(observation);
+        self.adapt_r_robbins_monro();
+        self.adapt_q_robbins_monro();
+        result
+    }
+    
+    // ═══════════════════════════════════════════════════════════════
+    // Adaptive Q/R (Robbins-Monro) [1] §3.6
+    // ═══════════════════════════════════════════════════════════════
+    
+    /// Adapt R (Measurement Noise) via Robbins-Monro
+    /// Conforme [1] §3.6.1
+    /// 
+    /// R[t] = (1 - α_r) × R[t-1] + α_r × (y² - H × P_pred × Hᵀ)
+    #[inline]
+    pub fn adapt_r_robbins_monro(&mut self) {
+        let innovation_sq = self.last_innovation * self.last_innovation;
+        
+        // H × P_pred × Hᵀ com H = [1, 0] = P_pred[0][0]
+        let h_p_ht = self.p_pred[0][0];
+        
+        let r_update = innovation_sq - h_p_ht;
+        self.r = (1.0 - self.alpha_r) * self.r + self.alpha_r * r_update;
+        self.r = self.r.max(self.r_min);
+    }
+    
+    /// Adapt Q (Process Noise) via Robbins-Monro
+    /// Conforme [1] §3.6
+    /// 
+    /// Q[t] = (1 - α_q) × Q[t-1] + α_q × (K × y × yᵀ × Kᵀ)
+    #[inline]
+    pub fn adapt_q_robbins_monro(&mut self) {
+        let k = self.last_k;
+        let y = self.last_innovation;
+        
+        // K × y
+        let ky = [k[0] * y, k[1] * y];
+        
+        // Q_update = (K × y) × (K × y)ᵀ (outer product)
+        let q_update = [
+            [ky[0] * ky[0], ky[0] * ky[1]],
+            [ky[1] * ky[0], ky[1] * ky[1]],
+        ];
+        
+        // Q[t] = (1 - α_q) × Q[t-1] + α_q × Q_update
+        self.q[0][0] = ((1.0 - self.alpha_q) * self.q[0][0] + self.alpha_q * q_update[0][0]).max(self.q_min);
+        self.q[0][1] = (1.0 - self.alpha_q) * self.q[0][1] + self.alpha_q * q_update[0][1];
+        self.q[1][0] = (1.0 - self.alpha_q) * self.q[1][0] + self.alpha_q * q_update[1][0];
+        self.q[1][1] = ((1.0 - self.alpha_q) * self.q[1][1] + self.alpha_q * q_update[1][1]).max(self.q_min);
+    }
+    
+    // ═══════════════════════════════════════════════════════════════
+    // Numerical Stability [1] §13.2
+    // ═══════════════════════════════════════════════════════════════
+    
+    /// Simetriza matriz de covariância
+    /// P = (P + Pᵀ) / 2
+    /// Conforme [1] §13.2
+    #[inline]
+    pub fn symmetrize_covariance(&mut self) -> bool {
+        let asymmetry = (self.p[0][1] - self.p[1][0]).abs();
+        
+        if asymmetry > 1e-15 {
+            let avg = (self.p[0][1] + self.p[1][0]) / 2.0;
+            self.p[0][1] = avg;
+            self.p[1][0] = avg;
+            
+            // Também p_pred
+            let avg_pred = (self.p_pred[0][1] + self.p_pred[1][0]) / 2.0;
+            self.p_pred[0][1] = avg_pred;
+            self.p_pred[1][0] = avg_pred;
+            
+            return true;
+        }
+        false
+    }
+    
+    /// Verifica saúde da matriz de covariância
+    #[inline]
+    pub fn check_covariance_health(&self) -> (bool, CovarianceHealth) {
+        let trace = self.p[0][0] + self.p[1][1];
+        let det = self.p[0][0] * self.p[1][1] - self.p[0][1] * self.p[1][0];
+        let asymmetry = (self.p[0][1] - self.p[1][0]).abs();
+        
+        let is_positive_definite = det > 1e-12 && trace > 0.0;
+        let is_symmetric = asymmetry < 1e-10;
+        
+        let health = CovarianceHealth {
+            determinant: det,
+            trace,
+            asymmetry,
+            is_positive_definite,
+            is_symmetric,
+        };
+        
+        (is_positive_definite && is_symmetric, health)
+    }
+    
+    // ═══════════════════════════════════════════════════════════════
+    // Accessors
+    // ═══════════════════════════════════════════════════════════════
+    
+    /// Retorna velocity atual (taxa de mudança filtrada)
+    #[inline]
+    pub fn velocity(&self) -> f64 {
+        self.x[1]
+    }
+    
+    /// Retorna position atual
+    #[inline]
+    pub fn position(&self) -> f64 {
+        self.x[0]
+    }
+    
+    /// Retorna estado completo [position, velocity]
+    #[inline]
+    pub fn state(&self) -> [f64; 2] {
+        self.x
+    }
+    
+    /// Retorna covariância
+    #[inline]
+    pub fn covariance(&self) -> [[f64; 2]; 2] {
+        self.p
+    }
+    
+    /// Retorna Q atual
+    #[inline]
+    pub fn q(&self) -> [[f64; 2]; 2] {
+        self.q
+    }
+    
+    /// Retorna R atual
+    #[inline]
+    pub fn r(&self) -> f64 {
+        self.r
+    }
+    
+    /// Retorna desvio padrão da velocity
+    #[inline]
+    pub fn velocity_std(&self) -> f64 {
+        self.p[1][1].sqrt()
+    }
+    
+    /// Verifica se sinal está revertendo (velocity negativa)
+    #[inline]
+    pub fn is_reverting(&self) -> bool {
+        self.tick_count >= self.min_ticks && self.x[1] < 0.0
+    }
+    
+    /// Verifica se reversão é confirmada com threshold mínimo
+    #[inline]
+    pub fn is_reverting_with_threshold(&self, min_negative_velocity: f64) -> bool {
+        self.tick_count >= self.min_ticks && self.x[1] < min_negative_velocity
+    }
+    
+    /// Retorna contador de ticks
+    #[inline]
+    pub fn tick_count(&self) -> u64 {
+        self.tick_count
+    }
+    
+    /// Verifica se está warmed up
+    #[inline]
+    pub fn is_warmed_up(&self) -> bool {
+        self.tick_count >= self.min_ticks
+    }
+    
+    /// Reseta o filtro
+    pub fn reset(&mut self) {
+        self.x = [0.0, 0.0];
+        self.p = [[1.0, 0.0], [0.0, 0.1]];
+        self.p_pred = [[1.0, 0.0], [0.0, 0.1]];
+        self.q = [[1e-5, 0.0], [0.0, 1e-6]];
+        self.r = 1e-4;
+        self.last_innovation = 0.0;
+        self.last_k = [0.0, 0.0];
+        self.tick_count = 0;
+    }
+}
+
+impl Default for PositionVelocityKalman {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod pv_kalman_tests {
+    use super::*;
+    
+    #[test]
+    fn test_p_pred_initialization() {
+        let pv = PositionVelocityKalman::new();
+        assert!((pv.p_pred[0][0] - 1.0).abs() < 0.001);
+        assert!((pv.p_pred[1][1] - 0.1).abs() < 0.001);
+    }
+    
+    #[test]
+    fn test_p_pred_after_predict() {
+        let mut pv = PositionVelocityKalman::new();
+        pv.predict();
+        // p_pred deve ser atualizado após predict
+        assert!(pv.p_pred[0][0] > 1.0); // Aumentou com Q
+    }
+    
+    #[test]
+    fn test_velocity_detection() {
+        let mut pv = PositionVelocityKalman::new();
+        
+        // Simular sinal subindo
+        for i in 0..20 {
+            pv.step_adaptive(i as f64 * 0.1);
+        }
+        
+        // Velocity deve ser positiva
+        assert!(pv.velocity() > 0.0);
+        assert!(!pv.is_reverting());
+        
+        // Simular reversão
+        for i in (0..15).rev() {
+            pv.step_adaptive(2.0 - (15 - i) as f64 * 0.15);
+        }
+        
+        // Velocity deve ser negativa
+        assert!(pv.velocity() < 0.0);
+        assert!(pv.is_reverting());
+    }
+    
+    #[test]
+    fn test_adaptive_q_r() {
+        let mut pv = PositionVelocityKalman::new();
+        let initial_r = pv.r();
+        let initial_q00 = pv.q()[0][0];
+        
+        // Processar dados com variância
+        for i in 0..50 {
+            let noise = if i % 2 == 0 { 0.1 } else { -0.1 };
+            pv.step_adaptive(i as f64 * 0.05 + noise);
+        }
+        
+        // Q e R devem ter adaptado
+        assert!((pv.r() - initial_r).abs() > 1e-10 || pv.r() >= pv.r_min);
+        assert!((pv.q()[0][0] - initial_q00).abs() > 1e-12 || pv.q()[0][0] >= pv.q_min);
+    }
+    
+    #[test]
+    fn test_symmetrize() {
+        let mut pv = PositionVelocityKalman::new();
+        
+        // Forçar assimetria
+        pv.p[0][1] = 0.01;
+        pv.p[1][0] = 0.02;
+        
+        let corrected = pv.symmetrize_covariance();
+        assert!(corrected);
+        assert!((pv.p[0][1] - pv.p[1][0]).abs() < 1e-15);
+    }
+    
+    #[test]
+    fn test_health_check() {
+        let pv = PositionVelocityKalman::new();
+        let (healthy, health) = pv.check_covariance_health();
+        
+        assert!(healthy);
+        assert!(health.is_positive_definite);
+        assert!(health.is_symmetric);
+        assert!(health.determinant > 0.0);
+    }
+    
+    #[test]
+    fn test_warmup() {
+        let mut pv = PositionVelocityKalman::with_config(PVKalmanConfig {
+            min_ticks: 10,
+            ..Default::default()
+        });
+        
+        for i in 0..9 {
+            let result = pv.step_adaptive(i as f64);
+            assert!(!result.is_valid);
+            assert!(!pv.is_warmed_up());
+        }
+        
+        let result = pv.step_adaptive(9.0);
+        assert!(result.is_valid);
+        assert!(pv.is_warmed_up());
+    }
+    
+    #[test]
+    fn test_reset() {
+        let mut pv = PositionVelocityKalman::new();
+        
+        for i in 0..50 {
+            pv.step_adaptive(i as f64);
+        }
+        
+        pv.reset();
+        
+        assert_eq!(pv.tick_count(), 0);
+        assert!((pv.position() - 0.0).abs() < 1e-10);
+        assert!((pv.velocity() - 0.0).abs() < 1e-10);
+        assert!((pv.p[0][0] - 1.0).abs() < 0.001);
+    }
+}
+
 // Simple vector operations (kept local as they're not matrix operations)
 #[inline(always)]
 fn vec_add<const N: usize>(a: &[f64; N], b: &[f64; N]) -> [f64; N] {
