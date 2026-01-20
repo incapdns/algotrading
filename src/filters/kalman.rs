@@ -699,6 +699,7 @@ impl KalmanFilter2D {
         self.last_h = [1.0, 1.0];
         self.last_innovation = 0.0;
         self.last_k = [0.0, 0.0];
+        self.p_pred = [[1.0, 0.0], [0.0, 0.01]];
     }
 }
 
