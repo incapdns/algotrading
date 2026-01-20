@@ -370,13 +370,14 @@ impl KalmanFilter2D {
     /// From documentation: Q diagonal, R scalar
     pub fn default_tick_engine() -> Self {
         Self::new(
-            1.0,    // initial_beta ✅
-            0.0,    // initial_alpha ✅
-            1.0,    // p_beta ✅
-            1e-5,   // ← Deveria ser p_alpha, não q_beta!
-            1e-5,   // ← Deveria ser q_beta
-            1e-3,   // ← Deveria ser q_alpha, mas está como r
-        )           // ← FALTA o parâmetro r!
+            1.0,    // initial_beta = 1.0 (hedge ratio starts at 1:1)
+            0.0,    // initial_alpha = 0.0 (no intercept initially)
+            1.0,    // p_beta = 1.0 (alta incerteza inicial para β)
+            0.01,   // p_alpha = 0.01 (intercepto mais estável)
+            1e-6,   // q_beta = 1e-6 (β muda lentamente)
+            1e-8,   // q_alpha = 1e-8 (α ainda mais lento)
+            1e-4,   // r = 1e-4 (~1 bps² de measurement noise)
+        )
     }
 
     /// Predict step
