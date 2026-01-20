@@ -330,18 +330,20 @@ pub struct KalmanFilter2D {
 
 impl KalmanFilter2D {
     /// Create new 2D Kalman filter for spread estimation
-    /// 
+    ///
     /// # Arguments
     /// * `initial_beta` - Initial hedge ratio estimate (typically 1.0)
     /// * `initial_alpha` - Initial intercept estimate (typically 0.0)
-    /// * `initial_p` - Initial covariance (uncertainty)
-    /// * `q_beta` - Process noise for β
-    /// * `q_alpha` - Process noise for α
-    /// * `r` - Measurement noise variance
+    /// * `p_beta` - Initial uncertainty for β (typically 1.0) [1]
+    /// * `p_alpha` - Initial uncertainty for α (typically 0.01) [1]
+    /// * `q_beta` - Process noise for β (typically 1e-6) [1]
+    /// * `q_alpha` - Process noise for α (typically 1e-8) [1]
+    /// * `r` - Measurement noise variance (typically 1e-4) [1]
     pub fn new(
         initial_beta: f64,
         initial_alpha: f64,
-        initial_p: f64,
+        p_beta: f64,    // ← Separado
+        p_alpha: f64,   // ← Separado
         q_beta: f64,
         q_alpha: f64,
         r: f64,
@@ -349,13 +351,13 @@ impl KalmanFilter2D {
         Self {
             x: [initial_beta, initial_alpha],
             p: [
-                [initial_p, 0.0],
-                [0.0, initial_p],
+                [p_beta, 0.0],     // ← P_beta = 1.0
+                [0.0, p_alpha],    // ← P_alpha = 0.01
             ],
             f: [
                 [1.0, 0.0],
                 [0.0, 1.0],
-            ], // Identity (random walk)
+            ],
             q: [
                 [q_beta, 0.0],
                 [0.0, q_alpha],
