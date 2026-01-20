@@ -348,6 +348,16 @@ pub struct KalmanFilter2D {
     last_k: [f64; 2],
 }
 
+/// Informações sobre saúde da matriz de covariância
+#[derive(Debug, Clone, Copy)]
+pub struct CovarianceHealth {
+    pub determinant: f64,
+    pub trace: f64,
+    pub asymmetry: f64,
+    pub is_positive_definite: bool,
+    pub is_symmetric: bool,
+}
+
 impl KalmanFilter2D {
     /// Create new 2D Kalman filter for spread estimation
     ///
@@ -411,6 +421,48 @@ impl KalmanFilter2D {
             1e-8,   // q_alpha = 1e-8 (α ainda mais lento)
             1e-4,   // r = 1e-4 (~1 bps² de measurement noise)
         )
+    }
+
+    #[inline]
+    pub fn symmetrize_covariance(&mut self) -> bool {
+        // Para matriz 2x2, apenas P[0][1] e P[1][0] precisam ser simétricos
+        let asymmetry = (self.p[0][1] - self.p[1][0]).abs();
+        
+        if asymmetry > 1e-15 {
+            // P = (P + Pᵀ) / 2
+            let avg = (self.p[0][1] + self.p[1][0]) / 2.0;
+            self.p[0][1] = avg;
+            self.p[1][0] = avg;
+            
+            // Também aplicar em p_pred para consistência
+            let avg_pred = (self.p_pred[0][1] + self.p_pred[1][0]) / 2.0;
+            self.p_pred[0][1] = avg_pred;
+            self.p_pred[1][0] = avg_pred;
+            
+            return true;
+        }
+        false
+    }
+
+    #[inline]
+    pub fn check_covariance_health(&self) -> (bool, CovarianceHealth) {
+        let trace = self.p[0][0] + self.p[1][1];
+        let det = self.p[0][0] * self.p[1][1] - self.p[0][1] * self.p[1][0];
+        let asymmetry = (self.p[0][1] - self.p[1][0]).abs();
+        
+        // P deve ser positiva definida: det > 0 e trace > 0
+        let is_positive_definite = det > 1e-12 && trace > 0.0;
+        let is_symmetric = asymmetry < 1e-10;
+        
+        let health = CovarianceHealth {
+            determinant: det,
+            trace,
+            asymmetry,
+            is_positive_definite,
+            is_symmetric,
+        };
+        
+        (is_positive_definite && is_symmetric, health)
     }
 
     /// Create with custom adaptive parameters
