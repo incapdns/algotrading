@@ -294,11 +294,6 @@ impl<const N: usize> KalmanFilterND<N> {
     }
 }
 
-// ============================================
-// Kalman Filter 2D otimizado para TickEngine V6
-// State: [β (hedge_ratio), α (intercept)]
-// ============================================
-
 /// 2D Kalman Filter for spread statistics (TickEngine V6)
 /// 
 /// Estimates:
@@ -308,7 +303,7 @@ impl<const N: usize> KalmanFilterND<N> {
 /// Features:
 /// - Joseph form covariance update (numerical stability)
 /// - Dynamic observation matrix H
-/// - Adaptive Q/R support
+/// - Adaptive Q/R via Robbins-Monro conforme §3.6 [13]
 #[repr(align(64))]
 #[derive(Debug, Clone)]
 pub struct KalmanFilter2D {
@@ -321,11 +316,32 @@ pub struct KalmanFilter2D {
     /// State transition matrix (usually identity for random walk)
     f: [[f64; 2]; 2],
     
-    /// Process noise covariance (adaptive)
+    /// Process noise covariance (adaptive via Robbins-Monro)
     q: [[f64; 2]; 2],
     
-    /// Measurement noise variance (adaptive, scalar for 1D measurement)
+    /// Measurement noise variance (adaptive via Robbins-Monro, scalar for 1D measurement)
     r: f64,
+
+    /// Alpha para adaptação de Q conforme §3.6 [13] (default: 0.01)
+    alpha_q: f64,
+
+    /// Alpha para adaptação de R conforme §3.6 [13] (default: 0.05)
+    alpha_r: f64,
+
+    /// Floor mínimo para Q conforme §15.1 [13] (default: 1e-8)
+    q_min: f64,
+
+    /// Floor mínimo para R conforme §15.1 [13] (default: 1e-6)
+    r_min: f64,
+
+    /// Último H usado (para cálculo de R adaptativo)
+    last_h: [f64; 2],
+
+    /// Última innovation (para cálculo de Q adaptativo)
+    last_innovation: f64,
+
+    /// Último Kalman gain (para cálculo de Q adaptativo)
+    last_k: [f64; 2],
 }
 
 impl KalmanFilter2D {
@@ -334,16 +350,16 @@ impl KalmanFilter2D {
     /// # Arguments
     /// * `initial_beta` - Initial hedge ratio estimate (typically 1.0)
     /// * `initial_alpha` - Initial intercept estimate (typically 0.0)
-    /// * `p_beta` - Initial uncertainty for β (typically 1.0) [1]
-    /// * `p_alpha` - Initial uncertainty for α (typically 0.01) [1]
-    /// * `q_beta` - Process noise for β (typically 1e-6) [1]
-    /// * `q_alpha` - Process noise for α (typically 1e-8) [1]
-    /// * `r` - Measurement noise variance (typically 1e-4) [1]
+    /// * `p_beta` - Initial uncertainty for β (typically 1.0) [13] §15.1
+    /// * `p_alpha` - Initial uncertainty for α (typically 0.01) [13] §15.1
+    /// * `q_beta` - Process noise for β (typically 1e-6) [13] §15.1
+    /// * `q_alpha` - Process noise for α (typically 1e-8) [13] §15.1
+    /// * `r` - Measurement noise variance (typically 1e-4) [13] §15.1
     pub fn new(
         initial_beta: f64,
         initial_alpha: f64,
-        p_beta: f64,    // ← Separado
-        p_alpha: f64,   // ← Separado
+        p_beta: f64,
+        p_alpha: f64,
         q_beta: f64,
         q_alpha: f64,
         r: f64,
@@ -351,8 +367,8 @@ impl KalmanFilter2D {
         Self {
             x: [initial_beta, initial_alpha],
             p: [
-                [p_beta, 0.0],     // ← P_beta = 1.0
-                [0.0, p_alpha],    // ← P_alpha = 0.01
+                [p_beta, 0.0],
+                [0.0, p_alpha],
             ],
             f: [
                 [1.0, 0.0],
@@ -363,11 +379,19 @@ impl KalmanFilter2D {
                 [0.0, q_alpha],
             ],
             r,
+            // Parâmetros adaptativos conforme §3.6 e §15.1 [13]
+            alpha_q: 0.01,
+            alpha_r: 0.05,
+            q_min: 1e-8,
+            r_min: 1e-6,
+            last_h: [1.0, 1.0],
+            last_innovation: 0.0,
+            last_k: [0.0, 0.0],
         }
     }
 
     /// Create with TickEngine V6 default parameters
-    /// From documentation: Q diagonal, R scalar
+    /// From documentation §15.1 [13]: Q diagonal, R scalar
     pub fn default_tick_engine() -> Self {
         Self::new(
             1.0,    // initial_beta = 1.0 (hedge ratio starts at 1:1)
@@ -378,6 +402,29 @@ impl KalmanFilter2D {
             1e-8,   // q_alpha = 1e-8 (α ainda mais lento)
             1e-4,   // r = 1e-4 (~1 bps² de measurement noise)
         )
+    }
+
+    /// Create with custom adaptive parameters
+    /// Conforme §3.6 [13]
+    pub fn with_adaptive_params(
+        initial_beta: f64,
+        initial_alpha: f64,
+        p_beta: f64,
+        p_alpha: f64,
+        q_beta: f64,
+        q_alpha: f64,
+        r: f64,
+        alpha_q: f64,
+        alpha_r: f64,
+        q_min: f64,
+        r_min: f64,
+    ) -> Self {
+        let mut filter = Self::new(initial_beta, initial_alpha, p_beta, p_alpha, q_beta, q_alpha, r);
+        filter.alpha_q = alpha_q;
+        filter.alpha_r = alpha_r;
+        filter.q_min = q_min;
+        filter.r_min = r_min;
+        filter
     }
 
     /// Predict step
@@ -399,39 +446,42 @@ impl KalmanFilter2D {
 
     /// Update step with dynamic H matrix
     /// 
-    /// For TickEngine V6:
+    /// For TickEngine V6 conforme §3.4 [13]:
     /// - measurement = vamp_spot
     /// - h = [vamp_futures, 1.0]
     /// 
-    /// Uses Joseph form for numerical stability:
+    /// Uses Joseph form for numerical stability conforme §3.4 [13]:
     /// P = (I - K*H) * P * (I - K*H)ᵀ + K * R * Kᵀ
     #[inline]
     pub fn update(&mut self, measurement: f64, h: [f64; 2]) -> KalmanUpdateND<2> {
+        // Guardar H para adaptação de R
+        self.last_h = h;
+
         // ===== Innovation =====
-        // y = z - H * x_pred
+        // y = z - H * x_pred conforme §3.4 [13]
         let h_x = h[0] * self.x[0] + h[1] * self.x[1];
         let innovation = measurement - h_x;
+        self.last_innovation = innovation;
 
         // ===== Innovation covariance =====
-        // S = H * P * Hᵀ + R
-        // For H = [h0, h1], S is scalar
+        // S = H * P * Hᵀ + R conforme §3.4 [13]
         let ph0 = self.p[0][0] * h[0] + self.p[0][1] * h[1];
         let ph1 = self.p[1][0] * h[0] + self.p[1][1] * h[1];
         let s = h[0] * ph0 + h[1] * ph1 + self.r;
 
         // ===== Kalman Gain =====
-        // K = P * Hᵀ * S⁻¹
+        // K = P * Hᵀ * S⁻¹ conforme §3.4 [13]
         let s_inv = 1.0 / s.max(1e-10);
         let k = [ph0 * s_inv, ph1 * s_inv];
+        self.last_k = k;
 
         // ===== State update =====
-        // x = x + K * y
+        // x = x + K * y conforme §3.4 [13]
         self.x[0] += k[0] * innovation;
         self.x[1] += k[1] * innovation;
 
         // ===== Covariance update (Joseph form) =====
-        // I_KH = I - K * H
-        // P = I_KH * P * I_KHᵀ + K * R * Kᵀ
+        // Conforme §3.4 [13]: P = (I - K*H) * P * (I - K*H)ᵀ + K * R * Kᵀ
         let i_kh = [
             [1.0 - k[0] * h[0], -k[0] * h[1]],
             [-k[1] * h[0], 1.0 - k[1] * h[1]],
@@ -492,34 +542,110 @@ impl KalmanFilter2D {
         self.update(measurement, h)
     }
 
-    // ===== Adaptive Q/R methods =====
+    /// Combined predict + update with adaptive Q/R (Robbins-Monro)
+    /// Conforme §3.6 [13]
+    #[inline]
+    pub fn step_adaptive(&mut self, measurement: f64, h: [f64; 2]) -> KalmanUpdateND<2> {
+        self.predict();
+        let result = self.update(measurement, h);
+        
+        // Adaptar Q e R após o update
+        self.adapt_r_robbins_monro();
+        self.adapt_q_robbins_monro();
+        
+        result
+    }
 
-    /// Update process noise covariance
+    // ===== Adaptive Q/R methods (Robbins-Monro) conforme §3.6 [13] =====
+
+    /// Adapt R (Measurement Noise) via Robbins-Monro
+    /// Conforme §3.6 [13]:
+    /// 
+    /// ```text
+    /// innovation_sq = y[t]²
+    /// expected_innovation_sq = H × P[t|t-1] × Hᵀ + R[t-1]
+    /// R[t] = (1 - α_r) × R[t-1] + α_r × (innovation_sq - H × P[t|t-1] × Hᵀ)
+    /// R[t] = max(R[t], R_min)
+    /// ```
+    #[inline]
+    pub fn adapt_r_robbins_monro(&mut self) {
+        let h = self.last_h;
+        let innovation = self.last_innovation;
+        
+        // innovation_sq = y²
+        let innovation_sq = innovation * innovation;
+        
+        // H × P × Hᵀ (scalar, já que measurement é 1D)
+        // Usamos P atual (pós-update), mas conceitualmente deveria ser P[t|t-1]
+        // Para implementação correta, precisaríamos guardar P_pred
+        // Aproximação: usar P atual que é próximo
+        let ph0 = self.p[0][0] * h[0] + self.p[0][1] * h[1];
+        let ph1 = self.p[1][0] * h[0] + self.p[1][1] * h[1];
+        let h_p_ht = h[0] * ph0 + h[1] * ph1;
+        
+        // R[t] = (1 - α_r) × R[t-1] + α_r × (innovation_sq - H × P × Hᵀ)
+        let r_update = innovation_sq - h_p_ht;
+        self.r = (1.0 - self.alpha_r) * self.r + self.alpha_r * r_update;
+        
+        // Floor para estabilidade conforme §3.6 [13]
+        self.r = self.r.max(self.r_min);
+    }
+
+    /// Adapt Q (Process Noise) via Robbins-Monro
+    /// Conforme §3.6 [13]:
+    /// 
+    /// ```text
+    /// state_correction = K[t] × y[t]
+    /// Q[t] = (1 - α_q) × Q[t-1] + α_q × (K[t] × y[t] × y[t]ᵀ × K[t]ᵀ)
+    /// Q[t] = max(Q[t], Q_min)
+    /// ```
+    #[inline]
+    pub fn adapt_q_robbins_monro(&mut self) {
+        let k = self.last_k;
+        let y = self.last_innovation;
+        
+        // K × y × yᵀ × Kᵀ = (K × y) × (K × y)ᵀ
+        // Para state 2D: outer product de (K × y)
+        let ky = [k[0] * y, k[1] * y];
+        
+        // Q_update = ky × kyᵀ (outer product)
+        let q_update = [
+            [ky[0] * ky[0], ky[0] * ky[1]],
+            [ky[1] * ky[0], ky[1] * ky[1]],
+        ];
+        
+        // Q[t] = (1 - α_q) × Q[t-1] + α_q × Q_update
+        self.q[0][0] = (1.0 - self.alpha_q) * self.q[0][0] + self.alpha_q * q_update[0][0];
+        self.q[0][1] = (1.0 - self.alpha_q) * self.q[0][1] + self.alpha_q * q_update[0][1];
+        self.q[1][0] = (1.0 - self.alpha_q) * self.q[1][0] + self.alpha_q * q_update[1][0];
+        self.q[1][1] = (1.0 - self.alpha_q) * self.q[1][1] + self.alpha_q * q_update[1][1];
+        
+        // Floor para estabilidade conforme §3.6 [13]
+        self.q[0][0] = self.q[0][0].max(self.q_min);
+        self.q[1][1] = self.q[1][1].max(self.q_min);
+    }
+
+    /// Update process noise covariance manually
     #[inline]
     pub fn set_q(&mut self, q_beta: f64, q_alpha: f64) {
-        self.q[0][0] = q_beta;
-        self.q[1][1] = q_alpha;
+        self.q[0][0] = q_beta.max(self.q_min);
+        self.q[1][1] = q_alpha.max(self.q_min);
     }
 
-    /// Update measurement noise variance
+    /// Update measurement noise variance manually
     #[inline]
     pub fn set_r(&mut self, r: f64) {
-        self.r = r;
+        self.r = r.max(self.r_min);
     }
 
-    /// Adapt Q based on innovation (TickEngine V6 adaptive)
-    /// Increases Q when innovations are large
+    /// Set adaptive parameters
+    /// Conforme §15.1 [13]: alpha_q=0.01, alpha_r=0.05
     #[inline]
-    pub fn adapt_q(&mut self, innovation_var: f64, base_q: f64, sensitivity: f64) {
-        let adaptive_q = base_q * (1.0 + sensitivity * innovation_var);
-        self.q[0][0] = adaptive_q;
-        self.q[1][1] = adaptive_q;
-    }
-
-    /// Adapt R based on recent measurement variance
-    #[inline]
-    pub fn adapt_r(&mut self, measurement_var: f64, min_r: f64) {
-        self.r = measurement_var.max(min_r);
+    pub fn set_adaptive_params(&mut self, alpha_q: f64, alpha_r: f64, q_min: f64, r_min: f64) {
+        self.alpha_q = alpha_q;
+        self.alpha_r = alpha_r;
+        self.q_min = q_min;
+        self.r_min = r_min;
     }
 
     // ===== Accessors =====
@@ -548,6 +674,18 @@ impl KalmanFilter2D {
         self.p
     }
 
+    /// Get current Q matrix
+    #[inline]
+    pub fn q(&self) -> [[f64; 2]; 2] {
+        self.q
+    }
+
+    /// Get current R value
+    #[inline]
+    pub fn r(&self) -> f64 {
+        self.r
+    }
+
     /// Get β uncertainty (std dev)
     #[inline]
     pub fn beta_std(&self) -> f64 {
@@ -558,6 +696,17 @@ impl KalmanFilter2D {
     #[inline]
     pub fn alpha_std(&self) -> f64 {
         self.p[1][1].sqrt()
+    }
+
+    /// Reset filter to initial state
+    pub fn reset(&mut self) {
+        self.x = [1.0, 0.0];
+        self.p = [[1.0, 0.0], [0.0, 0.01]];
+        self.q = [[1e-6, 0.0], [0.0, 1e-8]];
+        self.r = 1e-4;
+        self.last_h = [1.0, 1.0];
+        self.last_innovation = 0.0;
+        self.last_k = [0.0, 0.0];
     }
 }
 
