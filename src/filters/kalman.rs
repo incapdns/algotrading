@@ -918,6 +918,41 @@ pub struct PositionVelocityKalman {
 }
 
 impl PositionVelocityKalman {
+    /// Do PREDICT
+    /// 
+    /// Reference: Bar-Shalom (2001)
+    pub fn predict_only(&mut self) -> PVKalmanResult {
+        // State prediction (Constant Velocity Model)
+        // position_pred = position + velocity
+        self.x[0] = self.x[0] + self.x[1];
+        // velocity permanece (random walk)
+        
+        // Covariance prediction: P = F × P × F' + Q
+        let fp00 = self.p[0][0] + self.p[1][0];
+        let fp01 = self.p[0][1] + self.p[1][1];
+        let fp10 = self.p[1][0];
+        let fp11 = self.p[1][1];
+        
+        self.p[0][0] = fp00 + fp01 + self.q[0][0];
+        self.p[0][1] = fp01;
+        self.p[1][0] = fp10 + fp11;
+        self.p[1][1] = fp11 + self.q[1][1];
+        
+        self.p_pred = self.p;
+        
+        PVKalmanResult {
+            position: self.x[0],
+            velocity: self.x[1],
+            innovation: 0.0,
+            innovation_var: self.p[0][0] + self.r,
+            velocity_std: self.p[1][1].sqrt(),
+            kalman_gain: [0.0, 0.0],
+            is_valid: self.tick_count >= self.min_ticks,
+        }
+    }
+}
+
+impl PositionVelocityKalman {
     /// Cria novo filtro com configuração padrão
     pub fn new() -> Self {
         Self::with_config(PVKalmanConfig::default())
